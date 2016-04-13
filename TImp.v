@@ -1,4 +1,4 @@
-Require Export CaseLtac Arith Omega.
+Require Export CaseLtac Arith Omega Coq.Program.Equality.
 
 Module Id. 
 
@@ -140,7 +140,7 @@ Inductive txn_step : (com * state * effect) -> ((option com) * effect) -> Prop :
                (c1;;c2, st, F) -t-> (Some c2, F')
   where "x '-t->' y" := (txn_step x y).
 
-Reserved Notation "x '--->' y" (at level 40).
+Reserved Notation "x '--->' y" (at level 50).
 
 Definition com_step_relation := (com * state) -> ((option com) * state) -> Prop.
 
@@ -307,29 +307,33 @@ Definition foo : (nat*nat) -> nat := fun p => let (x,_) := p in x.
 
 Check (fun x y => x).
 
-Definition interleaved_step : ssrelation -> com_step_relation :=
-  fun R p1 p2 => let (c,st) := p1 in
-                 let (opc,st') := p2 in
+Definition interleaved_step (R : ssrelation) (c:com) (st:state) 
+        (opc:option com) (st':state) : Prop :=
                  (c,st) ---> (opc,st') \/ (opc = Some c /\ R st st').
 
-Notation " t1 '-(' R ')->' t2 " := (interleaved_step R t1 t2) (at level 40).
+Notation " 'RSTEP' '(' c ',' st ')' '-(' R ')->' '(' opc ',' st' ')'" := 
+  (interleaved_step R c st opc st') (at level 40, c at level 39).
 
-Reserved Notation " t1 '-(' R ')->*' t2 "(at level 40).
 
-Inductive interleaved_multi_step (R : ssrelation)  : com_step_relation :=
- | interleaved_base : forall c opc st st',
-                        (c,st) -(R)-> (opc,st') ->
-                        ((c,st) -(R)->* (opc,st'))
- | interleaved_trans : forall c c' opc st st1 st',
-                        (c,st) ---> (Some c',st1) ->
-                        (c',st1) -(R)->* (opc,st') ->
-                        (c,st) -(R)->* (opc,st')
-  where " t1 '-(' R ')->*' t2 " := (interleaved_multi_step R t1 t2).
+Inductive interleaved_multi_step (R : ssrelation) (c : com) (st : state) 
+          (opc' : option com) (st' : state) : Prop := 
+ | interleaved_base : RSTEP (c,st) -(R)-> (opc',st') ->
+                      interleaved_multi_step R c st opc' st'
+ | interleaved_trans : forall c1 st1,
+                        (c,st) ---> (Some c1,st1) ->
+                        interleaved_multi_step R c1 st1 opc' st' ->
+                        interleaved_multi_step R c st opc' st'.
+
+Check interleaved_multi_step_ind.
+Check list_ind.
+
+Notation " 'R*STEP' '(' c , st ')' '-(' R ')->*' '(' opc ',' st' ')'" := 
+  (interleaved_multi_step R c st opc st')(at level 40).
 
 Definition step_guaranteed (R G :ssrelation) (c :com) (st : state) :=
   (forall st', (c,st) ---> (None,st') -> G st st')
     /\
-  (forall c' opc'' st' st'', (c,st) -(R)->* (Some c',st') ->
+  (forall c' opc'' st' st'',  R*STEP (c,st) -(R)->* (Some c',st') ->
                               (c',st') ---> (opc'',st'') ->
                               G st' st'').
 
@@ -337,7 +341,7 @@ Definition RG_quintuple (R G : ssrelation)(P : Assertion) (c:com)
            (Q : Assertion): Prop :=
   forall st st',
     P st ->
-    (c,st) -(R)->* (None,st')  ->
+    R*STEP (c,st) -(R)->* (None,st')  ->
     Q st' /\ (step_guaranteed R G c st).
 
 Notation "{{ R ',' P }} c {{ G ',' Q }}" := 
@@ -349,7 +353,70 @@ Definition stable (P : Assertion) (R : ssrelation) :=
 Definition subsumes_states (P Q : Assertion) (G : ssrelation) :=
   forall st st', P st -> Q st' -> G st st'.
 
-Notation "'(' P ',' Q ')' '∈' G" := (subsumes_states P Q G) (at level 90).
+Lemma star_stability_weakening : forall P R,
+  stable P (R^*) -> stable P R.
+Proof.
+  intros.
+  unfold stable; unfold stable in H.
+  intros.
+  apply H with (st:=st).
+  split. intuition.
+  apply rstar_trans with (y:=st').
+  intuition.
+  apply rstar_refl.
+Qed.
+
+Lemma rg_asgn_helper : forall X a st R c st',
+   R*STEP (X::=a,st) -(R)->* (Some c, st') -> c = X::=a /\ R st st'.
+Proof.
+  intros X a st R c st' H.
+  inversion H.
+  inversion H0.
+  inversion H1.
+  inversion H1. inversion H2.
+  intuition.
+  inversion H0.
+Qed.
+
+Lemma rg_seq_intermediary: forall R c1 c2 st st'',
+   R*STEP (c1;; c2, st) -(R)->* (None, st'') ->
+   exists st', 
+     R*STEP (c1,st) -(R)->* (None,st') /\ R*STEP (c2,st') -(R)->* (None,st'').
+Proof.
+  intros.
+  dependent induction H.
+  + Case "interleaved_base".
+    inversion H. inversion H0. inversion H0. inversion H1.
+  + Case "interleaved_trans".
+    inversion H. 
+    - SCase "S_Seq1".
+      assert(exists st'0, R*STEP  (c1', st1)-( R )->*  (None, st'0) /\
+                          R*STEP  (c2, st'0)-( R )->*  (None, st')).
+        apply IHinterleaved_multi_step with (c1:=c1')(c2:=c2).
+        congruence. reflexivity.
+      inversion H7.
+      assert (RSTEP (c1, st) -(R)-> (Some c1', st1)).
+        unfold interleaved_step.
+        left. assumption.
+      assert (R*STEP  (c1, st)-( R )->*  (None, x)).
+        apply interleaved_trans with (c1:=c1')(st1:=st1).
+        assumption. intuition.
+      exists x. intuition.
+    - SCase "S_Seq2".
+      subst c0.
+      assert (RSTEP (c1, st) -(R)-> (None, st1)).
+        unfold interleaved_step.
+        left. assumption.
+      assert (R*STEP  (c1, st)-( R )->*  (None, st1)).
+        apply interleaved_base.
+        assumption.
+      exists st1.
+      intuition.
+Qed.
+
+Notation "'(' P ',' Q ')' '∈' G" := (subsumes_states P Q G) (at level 90) : subsumes_states_scope.
+
+Open Scope subsumes_states_scope.
 
 Theorem rg_asgn: forall R P G Q X a,
     stable P (R^*) -> 
@@ -360,24 +427,24 @@ Theorem rg_asgn: forall R P G Q X a,
 Proof.
   unfold RG_quintuple.
   intros R P G Q X a H H0 H1 H2 st st' H3 H4.
-  inversion H4.
+  inversion H4 as [H6|H6].
   + Case "interleaved_base".
     split.
     - SCase "PostCondition".
       unfold interleaved_step in H6.
-      inversion H6.
+      inversion H6 as [H10|H10].
       unfold hoare_triple in H0.
       apply H0 with (st:=st). 
       constructor. assumption. 
       assumption.
-      inversion H10. inversion H11.
+      inversion H10 as (H11,H12). inversion H11.
     - SCase "Guarantee".
       unfold step_guaranteed.
       split.
       * SSCase "SingleStep".
         intros.
         unfold subsumes_states in H2.
-        apply H2 with (st:=st)(st':=st'1).
+        apply H2 with (st:=st)(st':=st'0).
         assumption.
         (* From here, the proof is same as the previous case. *)
         (* How do I say that in coq? *)
@@ -387,40 +454,46 @@ Proof.
         assumption.
       * SSCase "Multistep".
         intros. 
-        (* Proof strategy is to show P st'1 and Q st'', and then
-           rely on subsumes_states property of G. *)
-        induction H10.
-        (* Base Case *)
-        inversion H13. inversion H17.
-        inversion H17; clear H17.
-        (* We now have R st st'1 *)
-        inversion H18. rewrite H20 in H11.
-        assert (opc'' = None).
-          inversion H11. reflexivity.
-        rewrite H17 in H11.      
+        assert (c'=X::=a /\ R st st'0).
+          apply rg_asgn_helper with (st:=st)(st':=st'0).
+          assumption.
         unfold subsumes_states in H2.
-        apply H2 with (st:=st'1)(st':=st'').
-        unfold stable in H.
-        apply H with (st:=st)(st':=st'1).
-        intuition. apply rstar_trans with (y:= st'1). assumption.
-        apply rstar_refl.
-        (* From here, the proof is (almost) same as the first case. *)
-        (* How do I say that in coq? *)
+        apply H2 with (st:=st'0)(st':=st'').
+        (*P st'0*)
+        assert (stable P R).
+          apply star_stability_weakening.
+          assumption.
+        unfold stable in H9.
+        apply H9 with (st:=st)(st':=st'0).
+        intuition.
+        (*Q st''*)
         unfold hoare_triple in H0.
-        apply H0 with (st:=st'1). 
-        constructor. assumption. 
-        unfold stable in H.
-        apply H with (st:=st)(st':=st'1).
-        intuition. apply rstar_trans with (y:= st'1). assumption.
-        apply rstar_refl.
+        apply H0 with (st:=st'0).
+        constructor.
+        inversion H8; clear H8.    
+        rewrite H9 in H7.
+        assert (opc'' = None).
+          inversion H7. reflexivity.
+        rewrite H8 in H7. assumption.
+        (*P st'0*)
+        assert (stable P R).
+          apply star_stability_weakening.
+          assumption.
+        unfold stable in H9.
+        apply H9 with (st:=st)(st':=st'0).
+        intuition.
   + Case "interleaved_trans".
-    inversion H10.
+    inversion H5.
 Qed.
 
-    unfold stable in H1.    
-    apply H1 with (st:=st5)(st':=st').
-    split.
-    clear H7 opc'' H8 st6 H6 st1 H5 c H14.
-    inversion H13.
-    apply H1 with (st:=st6)(st':=st5).
-    split. 
+
+Theorem rg_seq: forall R G P c1 Q' c2 Q,
+  {{R,P}} c1 {{G,Q'}} ->
+  {{R,Q'}} c2 {{G,Q}} ->
+  {{R,P}} c1 ;; c2 {{G,Q}}.
+Proof.
+  unfold RG_quintuple.
+  intros.
+  inversion H2.
+  + inversion H4. inversion H8. inversion H8. inversion H9.
+  +. 
